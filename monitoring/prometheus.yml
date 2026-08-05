@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Go Gateway - /metrics endpoint'i
+  - job_name: gateway
+    static_configs:
+      - targets: ["gateway:8080"]
+
+  # Go Aggregator - /metrics endpoint'i
+  - job_name: aggregator
+    static_configs:
+      - targets: ["aggregator:8081"]
+
+  # RabbitMQ - rabbitmq_prometheus plugin (kuyruk derinliği buradan gelir)
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  # Python Worker replica'ları - Docker Compose ağında servis adı DNS'i
+  # tüm replica IP'lerini A kaydı olarak döner; her biri ayrı scrape edilir.
+  - job_name: worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100

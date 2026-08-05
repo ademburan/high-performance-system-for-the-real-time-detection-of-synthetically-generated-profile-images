@@ -1,0 +1,176 @@
+services:
+  # --------------------------------------------------------------------------
+  # RabbitMQ - rabbitmq_prometheus plugin'i 15692 portunda metrik sunar.
+  # enabled_plugins dosyası mount edilerek plugin aktif edilir.
+  # --------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: ganeye-rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"      # AMQP
+      - "15672:15672"    # Management UI
+      - "15692:15692"    # Prometheus metrics
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - ganeye-net
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL - SQLite'ın yerini alan kalıcı veri deposu.
+  # Sürekli çalışan sistemde milyonlarca kayıt için uygun.
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: ganeye-postgres
+    environment:
+      POSTGRES_USER: ganeye
+      POSTGRES_PASSWORD: ganeye
+      POSTGRES_DB: ganeye
+    ports:
+      - "5432:5432"      # Host'tan evaluate.py erişimi için
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ganeye -d ganeye"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - ganeye-net
+
+  # --------------------------------------------------------------------------
+  # Go API Gateway - /metrics endpoint'i eklendi (Prometheus).
+  # --------------------------------------------------------------------------
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: ganeye-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      HTTP_PORT: "8080"
+      MAX_UPLOAD_MB: "10"
+      PUBLISH_TIMEOUT_MS: "2000"
+      MAX_CONCURRENT_REQUESTS: "256"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - ganeye-net
+    restart: on-failure
+
+  # --------------------------------------------------------------------------
+  # Python Worker - 9100 portunda Prometheus metrikleri sunar.
+  # Port host'a YAYINLANMAZ; Prometheus compose ağı içinden DNS ile
+  # tüm replica'ları bulup scrape eder.
+  # Not: deploy.replicas Docker Compose v2'de desteklenir.
+  # --------------------------------------------------------------------------
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    environment:
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      TASK_QUEUE: "tasks"
+      RESULT_QUEUE: "results"
+      PREFETCH_COUNT: "4"
+      METRICS_PORT: "9100"
+      GT_LEFT_EYE_X: "0.3808205078125"
+      GT_LEFT_EYE_Y: "0.4770548828125"
+      GT_RIGHT_EYE_X: "0.6152169921875"
+      GT_RIGHT_EYE_Y: "0.4771314453125"
+      BOT_THRESHOLD: "0.02"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - ganeye-net
+    restart: on-failure
+    deploy:
+      replicas: 2
+
+  # --------------------------------------------------------------------------
+  # Go Aggregator - artık PostgreSQL'e yazar (pgx, pure-Go, CGO yok).
+  # /metrics endpoint'i eklendi.
+  # --------------------------------------------------------------------------
+  aggregator:
+    build:
+      context: ./aggregator
+      dockerfile: Dockerfile
+    container_name: ganeye-aggregator
+    ports:
+      - "8081:8081"
+    environment:
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      RESULT_QUEUE: "results"
+      DATABASE_URL: "postgres://ganeye:ganeye@postgres:5432/ganeye"
+      HTTP_PORT: "8081"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ganeye-net
+    restart: on-failure
+
+  # --------------------------------------------------------------------------
+  # Prometheus - tüm servislerden metrik toplar.
+  # Worker replica'ları dns_sd_configs ile otomatik keşfedilir.
+  # --------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ganeye-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    networks:
+      - ganeye-net
+
+  # --------------------------------------------------------------------------
+  # Grafana - hazır dashboard ile gelir. http://localhost:3000 (admin/admin)
+  # --------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: ganeye-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - ganeye-net
+
+networks:
+  ganeye-net:
+    driver: bridge
+
+volumes:
+  rabbitmq-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
